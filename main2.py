@@ -12,7 +12,6 @@ from langchain_community.vectorstores import FAISS
 from urllib.parse import urlparse, parse_qs
 
 load_dotenv()
-print(os.environ.get("HUGGINGFACEHUB_API_TOKEN"))  
 
 # Support both local .env and Streamlit Cloud secrets
 try:
@@ -116,15 +115,17 @@ youtube_url = st.text_input("Enter a YouTube Video URL:", placeholder="https://w
 if youtube_url:
     try:
         video_id = extract_video_id(youtube_url)
+
+        # Clear chat history if video changes
+        if "current_video_id" not in st.session_state or st.session_state.current_video_id != video_id:
+            st.session_state.messages = []
+            st.session_state.current_video_id = video_id
+
         st.success(f"Video ID extracted: `{video_id}`")
         st.video(youtube_url)
 
         llm_model, embedding_model = load_models()
         rag_chain = build_rag_chain(video_id, llm_model, embedding_model)
-
-        # Initialize chat history
-        if "messages" not in st.session_state:
-            st.session_state.messages = []
 
         # Display chat history
         for message in st.session_state.messages:
