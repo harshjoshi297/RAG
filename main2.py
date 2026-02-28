@@ -69,10 +69,7 @@ def load_models():
     return llm_model, embedding_model
 
 
-@st.cache_resource(show_spinner="Fetching and indexing transcript...", hash_funcs={str: lambda x: x})
-def build_rag_chain(video_id: str, _llm_model, _embedding_model):
-
-    # Fetch transcript using Supadata API
+def build_rag_chain(video_id: str, llm_model, embedding_model):
     response = requests.get(
         f"https://api.supadata.ai/v1/youtube/transcript?videoId={video_id}",
         headers={"x-api-key": os.environ["SUPADATA_API_KEY"]}
@@ -86,7 +83,7 @@ def build_rag_chain(video_id: str, _llm_model, _embedding_model):
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.create_documents([transcript])
-    vector_store = FAISS.from_documents(chunks, _embedding_model)
+    vector_store = FAISS.from_documents(chunks, embedding_model)
     retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 4})
 
     prompt = PromptTemplate.from_template("""
@@ -103,7 +100,7 @@ Question: {question}
     rag_chain = (
         {"context": retriever, "question": RunnablePassthrough()}
         | prompt
-        | _llm_model
+        | llm_model
         | StrOutputParser()
     )
     return rag_chain
@@ -116,16 +113,29 @@ if youtube_url:
     try:
         video_id = extract_video_id(youtube_url)
 
-        # Clear chat history if video changes
-        if "current_video_id" not in st.session_state or st.session_state.current_video_id != video_id:
+        # Initialize session state
+        if "current_video_id" not in st.session_state:
+            st.session_state.current_video_id = None
+        if "messages" not in st.session_state:
+            st.session_state.messages = []
+        if "rag_chain" not in st.session_state:
+            st.session_state.rag_chain = None
+
+        # Rebuild chain and clear chat if video changes
+        if st.session_state.current_video_id != video_id:
             st.session_state.messages = []
             st.session_state.current_video_id = video_id
+            st.session_state.rag_chain = None
 
         st.success(f"Video ID extracted: `{video_id}`")
         st.video(youtube_url)
 
         llm_model, embedding_model = load_models()
-        rag_chain = build_rag_chain(video_id, llm_model, embedding_model)
+
+        # Build RAG chain only if not already built for this video
+        if st.session_state.rag_chain is None:
+            with st.spinner("Fetching and indexing transcript..."):
+                st.session_state.rag_chain = build_rag_chain(video_id, llm_model, embedding_model)
 
         # Display chat history
         for message in st.session_state.messages:
@@ -141,7 +151,7 @@ if youtube_url:
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
                     try:
-                        response = rag_chain.invoke(user_query)
+                        response = st.session_state.rag_chain.invoke(user_query)
                         if not response or response.strip() == "":
                             st.warning("Model returned an empty response. Try rephrasing your question.")
                         else:
