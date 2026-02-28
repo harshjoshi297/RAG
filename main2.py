@@ -1,25 +1,40 @@
 import os
+import requests
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint, HuggingFaceEndpointEmbeddings
+from langchain_groq import ChatGroq
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
-from youtube_transcript_api import YouTubeTranscriptApi
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from urllib.parse import urlparse, parse_qs
 
 load_dotenv()
+print(os.environ.get("HUGGINGFACEHUB_API_TOKEN"))  
 
+# Support both local .env and Streamlit Cloud secrets
 try:
     if "HUGGINGFACEHUB_API_TOKEN" in st.secrets:
         os.environ["HUGGINGFACEHUB_API_TOKEN"] = st.secrets["HUGGINGFACEHUB_API_TOKEN"]
+    if "SUPADATA_API_KEY" in st.secrets:
+        os.environ["SUPADATA_API_KEY"] = st.secrets["SUPADATA_API_KEY"]
+    if "GROQ_API_KEY" in st.secrets:
+        os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
 except Exception:
     pass
 
 if not os.environ.get("HUGGINGFACEHUB_API_TOKEN"):
-    st.error("HUGGINGFACEHUB_API_TOKEN not found.")
+    st.error("HUGGINGFACEHUB_API_TOKEN not found. Check your .env file or Streamlit secrets.")
+    st.stop()
+
+if not os.environ.get("SUPADATA_API_KEY"):
+    st.error("SUPADATA_API_KEY not found. Check your .env file or Streamlit secrets.")
+    st.stop()
+
+if not os.environ.get("GROQ_API_KEY"):
+    st.error("GROQ_API_KEY not found. Check your .env file or Streamlit secrets.")
     st.stop()
 
 st.set_page_config(page_title="YouTube RAG Chatbot", page_icon="🎥")
@@ -43,12 +58,11 @@ def extract_video_id(url: str) -> str:
 
 @st.cache_resource(show_spinner="Loading models...")
 def load_models():
-    llm = HuggingFaceEndpoint(
-        repo_id='mistralai/Mistral-7B-Instruct-v0.3',
-        task="text-generation",
-        max_new_tokens=512
+    llm_model = ChatGroq(
+        model="llama-3.1-8b-instant",
+        api_key=os.environ["GROQ_API_KEY"],
+        max_tokens=512
     )
-    llm_model = ChatHuggingFace(llm=llm)
     embedding_model = HuggingFaceEndpointEmbeddings(
         model="sentence-transformers/all-MiniLM-L6-v2",
         huggingfacehub_api_token=os.environ["HUGGINGFACEHUB_API_TOKEN"]
@@ -58,14 +72,18 @@ def load_models():
 
 @st.cache_resource(show_spinner="Fetching and indexing transcript...", hash_funcs={str: lambda x: x})
 def build_rag_chain(video_id: str, _llm_model, _embedding_model):
-    ytt_api = YouTubeTranscriptApi()
 
-    try:
-        transcript_list = ytt_api.fetch(video_id, languages=["en", "en-US", "en-GB", "en-CA", "en-AU"])
-    except Exception:
-        transcript_list = ytt_api.fetch(video_id)
+    # Fetch transcript using Supadata API
+    response = requests.get(
+        f"https://api.supadata.ai/v1/youtube/transcript?videoId={video_id}",
+        headers={"x-api-key": os.environ["SUPADATA_API_KEY"]}
+    )
+    data = response.json()
 
-    transcript = " ".join(chunk.text for chunk in transcript_list)
+    if "content" not in data:
+        raise ValueError(f"Could not fetch transcript. API response: {data}")
+
+    transcript = " ".join([item["text"] for item in data["content"]])
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.create_documents([transcript])
@@ -121,9 +139,15 @@ if youtube_url:
 
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    response = rag_chain.invoke(user_query)
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                    try:
+                        response = rag_chain.invoke(user_query)
+                        if not response or response.strip() == "":
+                            st.warning("Model returned an empty response. Try rephrasing your question.")
+                        else:
+                            st.markdown(response)
+                            st.session_state.messages.append({"role": "assistant", "content": response})
+                    except Exception as e:
+                        st.error(f"Error generating response: {e}")
 
     except ValueError as e:
         st.error(f"Invalid URL: {e}")
